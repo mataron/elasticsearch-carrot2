@@ -2,6 +2,7 @@ package org.carrot2.elasticsearch;
 
 import com.google.common.io.ByteStreams;
 import com.google.common.io.Resources;
+
 import org.apache.http.HttpResponse;
 import org.apache.http.HttpStatus;
 import org.carrot2.core.LanguageCode;
@@ -29,6 +30,11 @@ import org.elasticsearch.node.internal.InternalNode;
 import org.elasticsearch.rest.RestRequest.Method;
 import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.SearchHits;
+import org.elasticsearch.search.aggregations.Aggregation;
+import org.elasticsearch.search.aggregations.bucket.MultiBucketsAggregation;
+import org.elasticsearch.search.aggregations.bucket.SingleBucketAggregation;
+import org.elasticsearch.search.aggregations.bucket.MultiBucketsAggregation.Bucket;
+import org.elasticsearch.search.aggregations.metrics.tophits.TopHits;
 import org.elasticsearch.transport.TransportService;
 import org.fest.assertions.api.Assertions;
 import org.testng.annotations.AfterSuite;
@@ -194,7 +200,26 @@ public class AbstractApiTest {
                 idToHit.put(hit.getId(), hit);
             }
         }
-    
+        
+        if( result.getSearchResponse().getAggregations() != null ) {
+        	List<Aggregation> pending = new ArrayList<>( result.getSearchResponse().getAggregations().asList() );
+        	while( pending.size() > 0 ) {
+        		Aggregation aggr = pending.remove( 0 );
+        		if( aggr instanceof SingleBucketAggregation )
+        			pending.addAll( ( (SingleBucketAggregation) aggr ).getAggregations().asList() );
+        		else if( aggr instanceof MultiBucketsAggregation ) {
+        			List<? extends Bucket> buckets = (List< ? extends Bucket>) ( (MultiBucketsAggregation) aggr ).getBuckets();
+        			for( Bucket bucket : buckets )
+        				if( bucket.getAggregations() != null )
+        					pending.addAll( bucket.getAggregations().asList() );
+        		}
+        		else if( aggr.getName().equals( "documents" ) && aggr instanceof TopHits ) {
+        			for (SearchHit hit : ( (TopHits) aggr).getHits())
+        				idToHit.put(hit.getId(), hit);
+        		}
+        	}
+        }
+        
         String maxHits = result.getInfo().get(ClusteringActionResponse.Fields.Info.MAX_HITS);
         final boolean containsAllHits = 
                 (maxHits == null || maxHits.isEmpty() || Integer.parseInt(maxHits) == Integer.MAX_VALUE);

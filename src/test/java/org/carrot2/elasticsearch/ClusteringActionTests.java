@@ -1,6 +1,7 @@
 package org.carrot2.elasticsearch;
 
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -23,7 +24,9 @@ import org.elasticsearch.common.collect.Sets;
 import org.elasticsearch.common.xcontent.ToXContent;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentFactory;
+import org.elasticsearch.common.xcontent.XContentType;
 import org.elasticsearch.index.query.QueryBuilders;
+import org.elasticsearch.search.aggregations.AggregationBuilders;
 import org.fest.assertions.api.Assertions;
 import org.json.JSONObject;
 import org.testng.annotations.Test;
@@ -54,6 +57,41 @@ public class ClusteringActionTests extends AbstractApiTest {
     
         checkValid(result);
         checkJsonSerialization(result);
+    }
+    
+    @Test(dataProvider = "clients")
+    public void testTopHitsQuery(Client client) throws IOException {
+    	try{
+        ClusteringActionResponse result = new ClusteringActionRequestBuilder(client)
+            .setQueryHint("data mining")
+            .addFieldMapping("title", LogicalField.TITLE)
+            .addHighlightedFieldMapping("content", LogicalField.CONTENT)
+            .setSearchRequest(
+              client.prepareSearch()
+                    .setIndices(INDEX_NAME)
+                    .setTypes("test")
+                    .setSize(0)
+                    .setQuery(QueryBuilders.termQuery("_all", "data"))
+                    .addAggregation(  AggregationBuilders
+                                     .terms( "foo" )
+	                                     .field( "title" )
+	                                     .size( 5 )
+	                                     .subAggregation(
+	                                          AggregationBuilders.topHits( "documents" ).setFetchSource( true ) )
+                                     )
+                    .setHighlighterPreTags("")
+                    .setHighlighterPostTags("")
+                    .addField("title")
+                    .addHighlightedField("content")
+             )
+            .execute().actionGet();
+    
+        checkValid(result);
+        checkJsonSerialization(result);
+    	}catch(Throwable x){
+    		x.printStackTrace();
+    		throw x;
+    	}
     }
     
     @Test(dataProvider = "clients")

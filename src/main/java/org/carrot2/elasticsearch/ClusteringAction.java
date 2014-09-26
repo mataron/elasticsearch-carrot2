@@ -6,8 +6,10 @@ import static org.elasticsearch.rest.RestRequest.Method.GET;
 import static org.elasticsearch.rest.RestRequest.Method.POST;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -67,6 +69,10 @@ import org.elasticsearch.search.SearchHits;
 import org.elasticsearch.search.aggregations.Aggregation;
 import org.elasticsearch.search.aggregations.InternalAggregation;
 import org.elasticsearch.search.aggregations.InternalAggregations;
+import org.elasticsearch.search.aggregations.bucket.MultiBucketsAggregation;
+import org.elasticsearch.search.aggregations.bucket.MultiBucketsAggregation.Bucket;
+import org.elasticsearch.search.aggregations.bucket.SingleBucketAggregation;
+import org.elasticsearch.search.aggregations.metrics.tophits.TopHits;
 import org.elasticsearch.search.facet.InternalFacets;
 import org.elasticsearch.search.highlight.HighlightField;
 import org.elasticsearch.search.internal.InternalSearchHit;
@@ -890,119 +896,150 @@ public class ClusteringAction
             SearchHit [] hits = response.getHits().hits();
             List<Document> documents = Lists.newArrayListWithCapacity(hits.length);
             List<FieldMappingSpec> fieldMapping = request.getFieldMapping();
+
+            Set<String> ids = new HashSet<>();
+            
+            boolean emptySourceWarningEmitted = false;
+
+            for (SearchHit hit : hits)
+            	emptySourceWarningEmitted |= addSearchHitToDocumentList( hit, documents, fieldMapping, ids, emptySourceWarningEmitted );
+            
+            if( hits.length == 0 && response.getAggregations() != null ) {
+            	List<Aggregation> pending = new ArrayList<>( response.getAggregations().asList() );
+            	while( pending.size() > 0 ) {
+            		Aggregation aggr = pending.remove( 0 );
+            		if( aggr instanceof SingleBucketAggregation )
+            			pending.addAll( ( (SingleBucketAggregation) aggr ).getAggregations().asList() );
+            		else if( aggr instanceof MultiBucketsAggregation ) {
+            			List<? extends Bucket> buckets = (List< ? extends Bucket>) ( (MultiBucketsAggregation) aggr ).getBuckets();
+            			for( Bucket bucket : buckets )
+            				if( bucket.getAggregations() != null )
+            					pending.addAll( bucket.getAggregations().asList() );
+            		}
+            		else if( aggr.getName().equals( "documents" ) && aggr instanceof TopHits ) {
+            			for (SearchHit hit : ( (TopHits) aggr).getHits())
+                        	emptySourceWarningEmitted |= addSearchHitToDocumentList( hit, documents, fieldMapping, ids, emptySourceWarningEmitted );
+            		}
+            	}
+            }
+            
+            return documents;
+        }
+        
+        private boolean addSearchHitToDocumentList(SearchHit hit, List<Document> documentList, List<FieldMappingSpec> fieldMapping, Set<String> ids, boolean emptySourceWarningEmitted)
+        {
+        	if( ids.contains( hit.id() ) )
+        		return emptySourceWarningEmitted;
+        	ids.add( hit.id() );
+        	
             StringBuilder title = new StringBuilder();
             StringBuilder content = new StringBuilder();
             StringBuilder url = new StringBuilder();
             StringBuilder language = new StringBuilder();
             Joiner joiner = Joiner.on(" . ");
+
+            // Prepare logical fields for each hit.
+            title.setLength(0);
+            content.setLength(0);
+            url.setLength(0);
+            language.setLength(0);
             
-            boolean emptySourceWarningEmitted = false;
-    
-            for (SearchHit hit : hits) {
-                // Prepare logical fields for each hit.
-                title.setLength(0);
-                content.setLength(0);
-                url.setLength(0);
-                language.setLength(0);
-                
-                Map<String, SearchHitField> fields = hit.getFields();
-                Map<String, HighlightField> highlightFields = hit.getHighlightFields();
-    
-                Map<String,Object> sourceAsMap = null;
-                for (FieldMappingSpec spec : fieldMapping) {
-                    // Determine the content source.
-                    Object appendContent = null;
-                    switch (spec.source) {
-                        case FIELD:
-                            SearchHitField searchHitField = fields.get(spec.field);
-                            if (searchHitField != null) {
-                                appendContent = searchHitField.getValue();
-                            }
-                            break;
-                        
-                        case HIGHLIGHT:
-                            HighlightField highlightField = highlightFields.get(spec.field);
-                            if (highlightField != null) {
-                                appendContent = joiner.join(highlightField.fragments());
-                            }
-                            break;
-    
-                        case SOURCE:
-                            if (sourceAsMap == null) {
-                                if (hit.isSourceEmpty()) {
-                                    if (!emptySourceWarningEmitted) {
-                                        emptySourceWarningEmitted = true;
-                                        logger.warn("_source field mapping used but no source available for: {}, field {}", hit.getId(), spec.field);
-                                    }
-                                } else {
-                                    sourceAsMap = hit.getSource();
+            Map<String, SearchHitField> fields = hit.getFields();
+            Map<String, HighlightField> highlightFields = hit.getHighlightFields();
+
+            Map<String,Object> sourceAsMap = null;
+            for (FieldMappingSpec spec : fieldMapping) {
+                // Determine the content source.
+                Object appendContent = null;
+                switch (spec.source) {
+                    case FIELD:
+                        SearchHitField searchHitField = fields.get(spec.field);
+                        if (searchHitField != null) {
+                            appendContent = searchHitField.getValue();
+                        }
+                        break;
+                    
+                    case HIGHLIGHT:
+                        HighlightField highlightField = highlightFields.get(spec.field);
+                        if (highlightField != null) {
+                            appendContent = joiner.join(highlightField.fragments());
+                        }
+                        break;
+
+                    case SOURCE:
+                        if (sourceAsMap == null) {
+                            if (hit.isSourceEmpty()) {
+                                if (!emptySourceWarningEmitted) {
+                                    emptySourceWarningEmitted = true;
+                                    logger.warn("_source field mapping used but no source available for: {}, field {}", hit.getId(), spec.field);
                                 }
+                            } else {
+                                sourceAsMap = hit.getSource();
                             }
-                            if (sourceAsMap != null) {
-                                appendContent = sourceAsMap.get(spec.field);
-                            }
+                        }
+                        if (sourceAsMap != null) {
+                            appendContent = sourceAsMap.get(spec.field);
+                        }
+                        break;
+
+                    default:
+                        throw org.carrot2.elasticsearch.Preconditions.unreachable();
+                }
+
+                // Determine the target field.
+                if (appendContent != null) {
+                    StringBuilder target;
+                    switch (spec.logicalField) {
+                        case URL:
+                            url.setLength(0); // Clear previous (single mapping allowed).
+                            target = url;
                             break;
-    
+                        case LANGUAGE:
+                            language.setLength(0); // Clear previous (single mapping allowed);
+                            target = language;
+                            break;
+                        case TITLE:
+                            target = title;
+                            break;
+                        case CONTENT:
+                            target = content;
+                            break;
                         default:
                             throw org.carrot2.elasticsearch.Preconditions.unreachable();
                     }
-    
-                    // Determine the target field.
+
+                    // Separate multiple fields with a single dot (prevent accidental phrase gluing).
                     if (appendContent != null) {
-                        StringBuilder target;
-                        switch (spec.logicalField) {
-                            case URL:
-                                url.setLength(0); // Clear previous (single mapping allowed).
-                                target = url;
-                                break;
-                            case LANGUAGE:
-                                language.setLength(0); // Clear previous (single mapping allowed);
-                                target = language;
-                                break;
-                            case TITLE:
-                                target = title;
-                                break;
-                            case CONTENT:
-                                target = content;
-                                break;
-                            default:
-                                throw org.carrot2.elasticsearch.Preconditions.unreachable();
+                        if (target.length() > 0) {
+                            target.append(" . ");
                         }
-    
-                        // Separate multiple fields with a single dot (prevent accidental phrase gluing).
-                        if (appendContent != null) {
-                            if (target.length() > 0) {
-                                target.append(" . ");
-                            }
-                            target.append(appendContent);
-                        }
+                        target.append(appendContent);
                     }
                 }
-    
-                LanguageCode langCode = null;
-                if (language.length() > 0) {
-                    String langCodeString = language.toString();
-                    if(langCodeString.equals("el")) 
-                    	langCodeString = "gr";
-                    langCode = LanguageCode.forISOCode(langCodeString);
-                    if( langCode == null )
-                    	langCode = LanguageCode.forISOCode( "en" );
-                    if (langCode == null && langCodeWarnings.add(langCodeString)) {
-                        logger.warn("Language mapping not a supported ISO639-1 code: {}", langCodeString);
-                    }
-                }
-    
-                Document doc = new Document(
-                        title.toString(),
-                        content.toString(),
-                        url.toString(),
-                        langCode,
-                        hit.id());
-    
-                documents.add(doc);
             }
-    
-            return documents;
+
+            LanguageCode langCode = null;
+            if (language.length() > 0) {
+                String langCodeString = language.toString();
+                if(langCodeString.equals("el")) 
+                	langCodeString = "gr";
+                langCode = LanguageCode.forISOCode(langCodeString);
+                if( langCode == null )
+                	langCode = LanguageCode.forISOCode( "en" );
+                if (langCode == null && langCodeWarnings.add(langCodeString)) {
+                    logger.warn("Language mapping not a supported ISO639-1 code: {}", langCodeString);
+                }
+            }
+
+            Document doc = new Document(
+                    title.toString(),
+                    content.toString(),
+                    url.toString(),
+                    langCode,
+                    hit.id());
+
+            documentList.add(doc);
+            return emptySourceWarningEmitted;
         }
     
         private final class TransportHandler extends BaseTransportRequestHandler<ClusteringActionRequest> {
