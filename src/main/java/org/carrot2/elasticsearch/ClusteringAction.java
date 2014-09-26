@@ -982,7 +982,11 @@ public class ClusteringAction
                 LanguageCode langCode = null;
                 if (language.length() > 0) {
                     String langCodeString = language.toString();
+                    if(langCodeString.equals("el")) 
+                    	langCodeString = "gr";
                     langCode = LanguageCode.forISOCode(langCodeString);
+                    if( langCode == null )
+                    	langCode = LanguageCode.forISOCode( "en" );
                     if (langCode == null && langCodeWarnings.add(langCodeString)) {
                         logger.warn("Language mapping not a supported ISO639-1 code: {}", langCodeString);
                     }
